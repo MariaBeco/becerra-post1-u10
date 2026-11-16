@@ -46,6 +46,36 @@ double bench_seq(size_t n_bytes) {
     return ns_entre(t0, t1) / (REPEAT * (double)n_bytes);   /* ns/byte */
 }
 
+/* Acceso aleatorio usando indices pre-mezclados (Fisher-Yates) */
+double bench_rand(size_t n_bytes) {
+    size_t n = n_bytes / sizeof(int);
+    int *arr = (int *)malloc(n * sizeof(int));
+    size_t *idx = (size_t *)malloc(n * sizeof(size_t));
+    if (!arr || !idx) { free(arr); free(idx); return -1.0; }
+
+    for (size_t i = 0; i < n; i++) { arr[i] = (int)i; idx[i] = i; }
+    /* Mezcla Fisher-Yates */
+    for (size_t i = n - 1; i > 0; i--) {
+        size_t j = (size_t)rand() % (i + 1);
+        size_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+    }
+
+    /* Con arrays grandes cada acceso va a RAM: 100 repeticiones de 64 MB
+       tardarian minutos, y 10 bastan para un promedio estable. */
+    int reps = (n_bytes >= RAND_GRANDE) ? REPEAT_RAND_GRANDE : REPEAT;
+
+    struct timespec t0, t1;
+    volatile long sum = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int r = 0; r < reps; r++)
+        for (size_t i = 0; i < n; i++)
+            sum += arr[idx[i]];
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    free(arr); free(idx);
+    return ns_entre(t0, t1) / (reps * (double)n);           /* ns/acceso */
+}
+
 int main(void) {
     size_t sizes[] = {
         4*KB, 8*KB, 16*KB, 32*KB,     /* region L1 */
@@ -54,10 +84,11 @@ int main(void) {
         16*MB, 64*MB                  /* region RAM */
     };
     int n = sizeof(sizes) / sizeof(sizes[0]);
-    printf("%-12s  %10s\n", "Array size", "ns/byte");
+    printf("%-10s  %12s  %14s\n", "Tam (KB)", "Seq ns/byte", "Rand ns/acceso");
     for (int i = 0; i < n; i++) {
-        double lat = bench_seq(sizes[i]);
-        printf("%-12zu  %10.3f\n", sizes[i] / KB, lat);
+        double seq = bench_seq(sizes[i]);
+        double rnd = bench_rand(sizes[i]);
+        printf("%-10zu  %12.3f  %14.3f\n", sizes[i] / KB, seq, rnd);
     }
     return 0;
 }
