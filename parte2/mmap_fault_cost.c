@@ -5,6 +5,8 @@
  * Mide cada pagina de un mmap anonimo dos veces: el primer toque provoca el
  * page fault (demand paging) y el segundo no.
  *   gcc -o mmap_fault_cost mmap_fault_cost.c && ./mmap_fault_cost
+ * Con el argumento "populate" agrega MAP_POPULATE (Decision 4):
+ *   ./mmap_fault_cost populate
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -12,16 +14,19 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <string.h>
 
 #define N_PAGES 200
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    int populate = (argc > 1 && strcmp(argv[1], "populate") == 0);
     long page_size = sysconf(_SC_PAGESIZE);
     size_t total = (size_t)N_PAGES * page_size;
 
     /* mmap anonimo: reserva direcciones virtuales sin RAM fisica asociada */
     char *base = mmap(NULL, total, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                      MAP_PRIVATE | MAP_ANONYMOUS | (populate ? MAP_POPULATE : 0),
+                      -1, 0);
     if (base == MAP_FAILED) { perror("mmap"); return 1; }
 
     struct timespec t0, t1;
@@ -43,7 +48,8 @@ int main(void) {
         sum_second += (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
     }
 
-    printf("Tamano de pagina: %ld bytes, paginas medidas: %d\n", page_size, N_PAGES);
+    printf("mmap %s, tamano de pagina: %ld bytes, paginas medidas: %d\n",
+           populate ? "con MAP_POPULATE" : "con demand paging", page_size, N_PAGES);
     printf("Costo promedio primer toque (con fault):  %.1f ns\n", sum_first / N_PAGES);
     printf("Costo promedio segundo toque (sin fault): %.1f ns\n", sum_second / N_PAGES);
     printf("Overhead atribuible al page fault:        %.1f ns\n",
