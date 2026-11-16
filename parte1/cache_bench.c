@@ -76,19 +76,89 @@ double bench_rand(size_t n_bytes) {
     return ns_entre(t0, t1) / (reps * (double)n);           /* ns/acceso */
 }
 
-int main(void) {
+/*
+ * Acceso con stride fijo: expone conflictos de asociatividad.
+ * Cada posicion visitada guarda el desplazamiento de la siguiente, asi que
+ * cada lectura depende de la anterior (persecucion de punteros). Con lecturas
+ * independientes, la CPU superpone varias a la vez y oculta la latencia; con
+ * lecturas dependientes, cada fallo de L1 se paga completo.
+ */
+double bench_stride(size_t n_bytes, size_t stride) {
+    char *arr = (char *)malloc(n_bytes);
+    if (!arr) return -1.0;
+    memset(arr, 1, n_bytes);
+
+    size_t steps = n_bytes / stride;
+    for (size_t i = 0; i < steps; i++) {
+        size_t sig = ((i + 1) % steps) * stride;   /* el ultimo vuelve al 0 */
+        memcpy(arr + i * stride, &sig, sizeof sig);
+    }
+
+    /* Mismo numero total de accesos para todos los strides */
+    long reps = (long)REPEAT * (STRIDE_ARRAY / LINEA) / (long)steps;
+
+    struct timespec t0, t1;
+    size_t off = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (long r = 0; r < reps; r++)
+        for (size_t i = 0; i < steps; i++)
+            off = *(volatile size_t *)(arr + off);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    if (off != 0) fprintf(stderr, "cadena rota\n");   /* usa off: no se elimina */
+    free(arr);
+    return ns_entre(t0, t1) / (reps * (double)steps);       /* ns/acceso */
+}
+
+/* Uso: ./cache_bench [seq|rand|stride]   (sin argumento: los tres) */
+int main(int argc, char *argv[]) {
+    const char *modo = (argc > 1) ? argv[1] : "todo";
+    int hacer_seq    = !strcmp(modo, "todo") || !strcmp(modo, "seq");
+    int hacer_rand   = !strcmp(modo, "todo") || !strcmp(modo, "rand");
+    int hacer_stride = !strcmp(modo, "todo") || !strcmp(modo, "stride");
+    if (!hacer_seq && !hacer_rand && !hacer_stride) {
+        fprintf(stderr, "Uso: %s [seq|rand|stride]\n", argv[0]);
+        return 1;
+    }
+
     size_t sizes[] = {
         4*KB, 8*KB, 16*KB, 32*KB,     /* region L1 */
         64*KB, 128*KB, 256*KB,        /* region L2 */
         512*KB, 1*MB, 4*MB,           /* region L3 */
         16*MB, 64*MB                  /* region RAM */
     };
+    /* Nivel que la guia asocia a cada tamano (L1=32K, L2=256K, L3=8M) */
+    const char *region[] = {
+        "L1", "L1", "L1", "L1", "L2", "L2", "L2", "L3", "L3", "L3", "RAM", "RAM"
+    };
     int n = sizeof(sizes) / sizeof(sizes[0]);
-    printf("%-10s  %12s  %14s\n", "Tam (KB)", "Seq ns/byte", "Rand ns/acceso");
-    for (int i = 0; i < n; i++) {
-        double seq = bench_seq(sizes[i]);
-        double rnd = bench_rand(sizes[i]);
-        printf("%-10zu  %12.3f  %14.3f\n", sizes[i] / KB, seq, rnd);
+
+    if (hacer_seq || hacer_rand) {
+        printf("%-10s  %-6s", "Tam (KB)", "Guia");
+        if (hacer_seq)  printf("  %12s", "Seq ns/byte");
+        if (hacer_rand) printf("  %14s", "Rand ns/acceso");
+        printf("\n");
+        for (int i = 0; i < n; i++) {
+            printf("%-10zu  %-6s", sizes[i] / KB, region[i]);
+            fflush(stdout);
+            if (hacer_seq)  printf("  %12.3f", bench_seq(sizes[i]));
+            if (hacer_rand) printf("  %14.3f", bench_rand(sizes[i]));
+            printf("\n");
+        }
+    }
+
+    if (hacer_stride) {
+        /* 64 B: una linea tras otra. 2048 y 4096 B: caen en 2 sets y en 1 set
+           de una L1 de 64 sets. 4160 B (4096 + 64): mismas 256 paginas que
+           4096, pero cada acceso cae en un set distinto (control). */
+        size_t strides[] = { 64, 2048, 4096, 4160 };
+        printf("%sStride sobre un array de %lu KB (lecturas dependientes)\n",
+               (hacer_seq || hacer_rand) ? "\n" : "", STRIDE_ARRAY / KB);
+        printf("%-12s  %10s  %10s\n", "Stride (B)", "Accesos", "ns/acceso");
+        for (int i = 0; i < 4; i++) {
+            double t = bench_stride(STRIDE_ARRAY, strides[i]);
+            printf("%-12zu  %10lu  %10.3f\n", strides[i], STRIDE_ARRAY / strides[i], t);
+        }
     }
     return 0;
 }
